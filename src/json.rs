@@ -2620,7 +2620,7 @@ mod tests {
     use super::JsonEvent::*;
     use super::StackElement::*;
     use super::{Json, DecodeResult, DecoderError, JsonEvent, Parser,
-                StackElement, Stack, Decoder, Encoder, EncoderError};
+                StackElement, Stack, Decoder, EncoderError};
     use std::{i64, u64, f32, f64};
     use std::collections::BTreeMap;
     use std::num::Float;
@@ -3910,16 +3910,13 @@ mod tests {
 
     #[test]
     fn test_encode_hashmap_with_arbitrary_key() {
-        use std::io::Writer;
         use std::collections::HashMap;
-        use std::fmt;
+        use json;
         #[derive(PartialEq, Eq, Hash, RustcEncodable)]
         struct ArbitraryType(u32);
         let mut hm: HashMap<ArbitraryType, bool> = HashMap::new();
         hm.insert(ArbitraryType(1), true);
-        let mut mem_buf = Vec::new();
-        let mut encoder = Encoder::new(&mut mem_buf as &mut fmt::Writer);
-        let result = hm.encode(&mut encoder);
+        let result = json::encode(&hm);
         match result.unwrap_err() {
             EncoderError::BadHashmapKey => (),
             _ => panic!("expected bad hash map key")
