@@ -220,15 +220,22 @@ impl<T> Parser<T> where T: Iterator<Item = char> {
                           name: String,
                           attributes: Vec<Attribute>)
                           -> ParserKindResult<Element> {
-        match try!(self.parse_char_skip_ws()) {
-            '<' => match try!(self.parse_char()) {
-                '/' => self.parse_element_close(name, attributes, Content::Nothing),
+        let mut text = String::new();
+        loop {
+            match try!(self.parse_char()) {
+                '<' => match try!(self.parse_char()) {
+                    '/' => return self.parse_element_close(name, attributes, Content::Nothing),
+                    c => {
+                        let inner = try!(self.parse_element_name(c));
+                        return self.parse_element_content_elements(name, attributes, inner);
+                    }
+                },
                 c => {
-                    let inner = try!(self.parse_element_name(c));
-                    self.parse_element_content_elements(name, attributes, inner)
+                    text.push(c);
+                    if c.is_whitespace() { continue; }
+                    return self.parse_element_content_text(name, attributes, text);
                 }
-            },
-            c => self.parse_element_content_text(name, attributes, c)
+            }
         }
     }
 
@@ -268,9 +275,8 @@ impl<T> Parser<T> where T: Iterator<Item = char> {
     fn parse_element_content_text(&mut self,
                                   name: String,
                                   attributes: Vec<Attribute>,
-                                  first_char: char)
+                                  mut text: String)
                                   -> ParserKindResult<Element> {
-        let mut text = format!("{}", first_char);
         loop {
             match try!(self.parse_char()) {
                 '<' => match try!(self.parse_char()) {
@@ -376,6 +382,30 @@ mod tests {
                 ],
                 content: Content::Nothing,
             }])
+        };
+        assert_eq!(p.parse(), Ok(structure));
+    }
+
+    #[test]
+    fn test_parse_text() {
+        let txt = r#"<root>   i am groot!  </root>"#;
+        let mut p = Parser::new(txt.chars());
+        let structure = Element {
+            name: "root".to_string(),
+            attributes: vec![],
+            content: Content::Text("   i am groot!  ".to_string()),
+        };
+        assert_eq!(p.parse(), Ok(structure));
+    }
+
+    #[test]
+    fn test_parse_nothing() {
+        let txt = r#"<root>     </root>"#;
+        let mut p = Parser::new(txt.chars());
+        let structure = Element {
+            name: "root".to_string(),
+            attributes: vec![],
+            content: Content::Nothing,
         };
         assert_eq!(p.parse(), Ok(structure));
     }
