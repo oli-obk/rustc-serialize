@@ -98,62 +98,69 @@ impl Decoder for XmlDecoder {
 }
 */
 
+#[derive(Debug, PartialEq, Eq)]
 enum Content {
     Text(String),
     Elements(Vec<Element>),
     Nothing,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct Attribute {
     name: String,
     value: String,
 }
 
+#[derive(Debug, Eq, PartialEq)]
 struct Element {
     attributes: Vec<Attribute>,
     content: Content,
     name : String,
 }
 
-struct Stack {
-    v : Vec<Content>
-}
-impl Stack {
-    fn new() -> Stack {
-        Stack {
-            v: vec![],
-        }
-    }
-}
-
+#[derive(Debug)]
 struct Parser<T> {
-    stack: Stack,
     rdr: T,
     line: usize,
     col: usize,
-    state: ParserState,
 }
 
 #[derive(Debug, Eq, PartialEq)]
-enum ParserError {
+struct ParserError {
+    line: usize,
+    col: usize,
+    kind: ParserErrorKind,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum ParserErrorKind {
     MultipleRoots,
     BogusGt, // >
     BogusLt, // <
     EOF,
     Unexpected(char),
     BadNameChar,
+    EmptyAttributeName,
+    EmptyElementName,
+    MixedTextAndElements,
 }
-type ParserResult<T> = Result<T, ParserError>;
 
-use self::ParserError::*;
+type ParserResult<T> = Result<T, ParserError>;
+type ParserKindResult<T> = Result<T, ParserErrorKind>;
+
+use self::ParserErrorKind::*;
 
 macro_rules! expect {
-    ($a:expr, $b:pat) => {
-        match try!($a) {
-            $b => {},
-            _ => return Err(Unexpected($a)),
+    ($a:expr, $b:expr) => {{
+        let ch = try!($a);
+        if ch != $b {
+            return Err(Unexpected(ch));
         }
-    }
+    }}
+}
+
+fn is_bad_name_char(c : char) -> bool {
+    r###"!"#$%&'()*+,/;<=>?@[\]^`{|}~"###.contains_char(c)
 }
 
 impl<T> Parser<T> where T: Iterator<Item = char> {
@@ -163,48 +170,162 @@ impl<T> Parser<T> where T: Iterator<Item = char> {
             rdr: rdr.into_iter(),
             line: 1,
             col: 0,
-            stack: Stack::new(),
-            state: FindTag,
         }
     }
 
     fn parse(&mut self) -> ParserResult<Element> {
-        self.parse_element()
+        match self.parse_element() {
+            Ok(el) => {
+                if self.parse_char_skip_ws() == Err(EOF) {
+                    Ok(el)
+                } else {
+                    Err(ParserError {
+                        kind: MultipleRoots,
+                        line: self.line,
+                        col: self.col,
+                    })
+                }
+            },
+            Err(err) => Err(ParserError {
+                kind: err,
+                line: self.line,
+                col: self.col,
+            }),
+        }
     }
 
-    fn is_bad_name_char(c : char) {
-        r###"!"#$%&'()*+,/;<=>?@[\]^`{|}~"###.contains_char(c)
-    }
+    fn parse_element_name(&mut self, first_char: char) -> ParserKindResult<Element> {
+        if is_bad_name_char(first_char) { return Err(BadNameChar); }
+        if first_char.is_whitespace() { return Err(EmptyElementName); }
 
-    fn parse_element(&mut self) -> ParserResult<Element> {
-        expect!(self.parse_char(), '<');
-        let mut name = String::new();
+        let mut name = format!("{}", first_char);
         loop {
-            match self.parse_char() {
+            match try!(self.parse_char()) {
+                '>' => return self.parse_element_body(name, vec![]),
                 c if is_bad_name_char(c) => return Err(BadNameChar),
                 c if c.is_whitespace() => break,
-                '>' => return self.parse_element_body(name, vec![]),
                 c => name.push(c),
             }
         }
         self.parse_element_attributes(name)
     }
 
-    fn parse_element_attributes(&mut self, name: String) -> ParserResult<Element> {
-        let mut v = vec![];
-        loop {
-            loop {
-                match self.parse_char() {
-                    c if c.is_whitespace() => continue,
-                    '>' => return self.parse_element_body(name, v),
+    fn parse_element(&mut self) -> ParserKindResult<Element> {
+        expect!(self.parse_char(), '<');
+        let ch = try!(self.parse_char());
+        self.parse_element_name(ch)
+    }
 
+    fn parse_element_body(&mut self,
+                          name: String,
+                          attributes: Vec<Attribute>)
+                          -> ParserKindResult<Element> {
+        match try!(self.parse_char_skip_ws()) {
+            '<' => match try!(self.parse_char()) {
+                '/' => self.parse_element_close(name, attributes, Content::Nothing),
+                c => {
+                    let inner = try!(self.parse_element_name(c));
+                    self.parse_element_content_elements(name, attributes, inner)
                 }
+            },
+            c => self.parse_element_content_text(name, attributes, c)
+        }
+    }
+
+    fn parse_element_close(&mut self,
+                           name: String,
+                           attributes: Vec<Attribute>,
+                           content: Content)
+                           -> ParserKindResult<Element> {
+        for c in name.chars() {
+            expect!(self.parse_char(), c);
+        }
+        expect!(self.parse_char(), '>');
+        Ok(Element {
+            name: name,
+            attributes: attributes,
+            content: content,
+        })
+    }
+
+    fn parse_element_content_elements(&mut self,
+                                      name: String,
+                                      attributes: Vec<Attribute>,
+                                      first_element: Element)
+                                      -> ParserKindResult<Element> {
+        let mut v = vec![first_element];
+        loop {
+            match try!(self.parse_char_skip_ws()) {
+                '<' => match try!(self.parse_char()) {
+                    '/' => return self.parse_element_close(name, attributes, Content::Elements(v)),
+                    c => v.push(try!(self.parse_element_name(c))),
+                },
+                _ => return Err(MixedTextAndElements),
             }
         }
     }
 
-    fn parse_char(&mut self) -> ParserResult<char> {
-        let ch = try!(rdr.next().ok_or(EOF));
+    fn parse_element_content_text(&mut self,
+                                  name: String,
+                                  attributes: Vec<Attribute>,
+                                  first_char: char)
+                                  -> ParserKindResult<Element> {
+        let mut text = format!("{}", first_char);
+        loop {
+            match try!(self.parse_char()) {
+                '<' => match try!(self.parse_char()) {
+                    '/' => return self.parse_element_close(name, attributes, Content::Text(text)),
+                    _ => return Err(MixedTextAndElements),
+                },
+                c => text.push(c),
+            }
+        }
+    }
+
+    fn parse_element_attributes(&mut self, name: String) -> ParserKindResult<Element> {
+        let mut v = vec![];
+        loop {
+            let mut attr_name = String::new();
+            match try!(self.parse_char_skip_ws()) {
+                '>' => return self.parse_element_body(name, v),
+                '=' => return Err(EmptyAttributeName),
+                c => attr_name.push(c),
+            }
+            loop {
+                match try!(self.parse_char()) {
+                    c if c.is_whitespace() => {
+                        expect!(self.parse_char_skip_ws(), '=');
+                        break;
+                    },
+                    '=' => break,
+                    c => attr_name.push(c),
+                }
+            }
+            expect!(self.parse_char_skip_ws(), '"');
+            let mut attr_value = String::new();
+            loop {
+                match try!(self.parse_char()) {
+                    '"' => break,
+                    c => attr_value.push(c),
+                }
+            }
+            v.push(Attribute {
+                name: attr_name,
+                value: attr_value,
+            });
+        }
+    }
+    fn parse_char_skip_ws(&mut self) -> ParserKindResult<char> {
+        loop {
+            match try!(self.parse_char()) {
+                c if c.is_whitespace() => continue,
+                c => return Ok(c),
+            }
+        }
+    }
+
+    fn parse_char(&mut self) -> ParserKindResult<char> {
+        let ch = try!(self.rdr.next().ok_or(EOF));
         match ch {
             '\n' => {
                 self.line += 1;
@@ -212,26 +333,61 @@ impl<T> Parser<T> where T: Iterator<Item = char> {
             },
             _ => self.col += 1,
         }
-        ch
+        Ok(ch)
     }
 }
 
 #[cfg(test)]
 mod tests {
     extern crate test;
-    use super::Parser;
-    use super::ParserError::*;
+    use super::{Parser, Element, Content, ParserError, Attribute};
+    use super::ParserErrorKind::*;
 
     #[test]
-    fn test_decode_option_none() {
+    fn test_parse_root_elem() {
         let txt = "<root><elem></elem></root>";
         let mut p = Parser::new(txt.chars());
+        let structure = Element {
+            name: "root".to_string(),
+            attributes: vec![],
+            content: Content::Elements(vec![Element{
+                name: "elem".to_string(),
+                attributes: vec![],
+                content: Content::Nothing,
+            }])
+        };
+        assert_eq!(p.parse(), Ok(structure));
     }
 
     #[test]
-    fn test_two_roots() {
+    fn test_parse_attributes() {
+        let txt = r#"<root><elem bla="blub hi cake><></baa>"></elem></root>"#;
+        let mut p = Parser::new(txt.chars());
+        let structure = Element {
+            name: "root".to_string(),
+            attributes: vec![],
+            content: Content::Elements(vec![Element{
+                name: "elem".to_string(),
+                attributes: vec![
+                    Attribute {
+                        name: "bla".to_string(),
+                        value: "blub hi cake><></baa>".to_string(),
+                    }
+                ],
+                content: Content::Nothing,
+            }])
+        };
+        assert_eq!(p.parse(), Ok(structure));
+    }
+
+    #[test]
+    fn test_parse_two_roots() {
         let txt = "<root></root><root></root>";
         let mut p = Parser::new(txt.chars());
-        assert!(p.parse() == Err(MultipleRoots));
+        assert_eq!(p.parse(), Err(ParserError {
+            kind: MultipleRoots,
+            col: 14,
+            line: 1,
+        }));
     }
 }
