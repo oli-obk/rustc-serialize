@@ -121,6 +121,26 @@ fn spaces(wr: &mut fmt::Write, n: u32) -> EncodeResult<()> {
     Ok(())
 }
 
+/// Shortcut function to encode a `T` into a Xml `String`
+pub fn encode<T: ::Encodable>(object: &T) -> EncodeResult<String> {
+    let mut s = String::new();
+    {
+        let mut encoder = Encoder::new(&mut s);
+        try!(object.encode(&mut encoder));
+    }
+    Ok(s)
+}
+
+/// Shortcut function to encode a `T` into a pretty Xml `String`
+pub fn encode_pretty<T: ::Encodable>(object: &T) -> EncodeResult<String> {
+    let mut s = String::new();
+    {
+        let mut encoder = Encoder::new_pretty(&mut s);
+        try!(object.encode(&mut encoder));
+    }
+    Ok(s)
+}
+
 impl<'a> ::Encoder for Encoder<'a> {
     type Error = EncoderError;
 
@@ -727,7 +747,7 @@ impl<T> Parser<T> where T: Iterator<Item = char> {
 #[cfg(test)]
 mod tests {
     extern crate test;
-    use super::{Parser, Element, Content, ParserError, Attribute};
+    use super::{Parser, Element, Content, ParserError, Attribute, encode, encode_pretty};
     use super::ParserErrorKind::*;
 
     #[test]
@@ -801,4 +821,95 @@ mod tests {
             line: 1,
         }));
     }
+
+    #[test]
+    fn test_write_object() {
+        #[derive(RustcEncodable)]
+        struct Dummy;
+        assert_eq!(encode(&Dummy).unwrap(), "<Dummy/>");
+        assert_eq!(encode_pretty(&Dummy).unwrap(), "<Dummy/>");
+
+        #[derive(RustcEncodable)]
+        struct Simple {
+            a: bool,
+        }
+
+        assert_eq!(
+            encode(&Simple{a: true}).unwrap(),
+            "<Simple><a>true</a></Simple>"
+        );
+        assert_eq!(
+            encode_pretty(&Simple{a: true}).unwrap(),
+            "<Simple>\n  \
+                <a>true</a>\n\
+            </Simple>"
+        );
+
+        #[derive(RustcEncodable)]
+        struct Simple2 {
+            c: String,
+        }
+
+        #[derive(RustcEncodable)]
+        struct Complex {
+            b: Vec<Simple2>,
+        }
+
+        let complex_obj = Complex {
+            b: vec![
+                Simple2 { c: "&uiaebla<>hello\x0c\r".to_string() },
+                Simple2 { c: "".to_string() },
+            ],
+        };
+
+        assert_eq!(
+            encode(&complex_obj).unwrap(),
+            "<Complex>\
+                <b>\
+                    <Simple2><c>&uiaebla<>hello\x0c\r</c></Simple2>\
+                    <Simple2><c></c></Simple2>\
+                </b>
+            </Complex>"
+        );
+
+        assert_eq!(
+            encode_pretty(&complex_obj).unwrap(),
+            "<Complex>\
+                <b>\n  \
+                    <Simple2><c>&uiaebla<>hello\x0c\r</c></Simple2>\n  \
+                    <Simple2><c></c></Simple2>\n  \
+                </b>\n  \
+            </Complex>"
+        );
+    }
+/*
+    #[test]
+    fn test_write_enum() {
+        let animal = Dog;
+        assert_eq!(
+            format!("{}", super::as_json(&animal)),
+            "\"Dog\""
+        );
+        assert_eq!(
+            format!("{}", super::as_pretty_json(&animal)),
+            "\"Dog\""
+        );
+
+        let animal = Frog("Henry".to_string(), 349);
+        assert_eq!(
+            format!("{}", super::as_json(&animal)),
+            "{\"variant\":\"Frog\",\"fields\":[\"Henry\",349]}"
+        );
+        assert_eq!(
+            format!("{}", super::as_pretty_json(&animal)),
+            "{\n  \
+               \"variant\": \"Frog\",\n  \
+               \"fields\": [\n    \
+                 \"Henry\",\n    \
+                 349\n  \
+               ]\n\
+             }"
+        );
+    }
+    */
 }
