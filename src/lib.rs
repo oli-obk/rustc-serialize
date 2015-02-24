@@ -31,6 +31,7 @@ mod collection_impls;
 pub mod base64;
 pub mod hex;
 pub mod json;
+pub mod xml;
 
 mod rustc_serialize {
     pub use serialize::*;
