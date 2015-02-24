@@ -93,7 +93,7 @@ fn escape_char(writer: &mut fmt::Write, ch: char) -> EncodeResult<()> {
         '&' => "&amp;",
         '\'' => "&apos;",
         '"' => "&quot;",
-        _ => unreachable!(),
+        c => return Ok(try!(write!(writer, "{}", c))),
     };
     try!(write!(writer, "{}", enc));
     Ok(())
@@ -292,6 +292,10 @@ impl<'a> ::Encoder for Encoder<'a> {
         if name.chars().any(|ch| is_bad_name_char(ch)) {
             return Err(EncoderError::BadStructFieldName);
         }
+        if let EncodingFormat::Pretty{ref curr_indent, ..} = self.format {
+            try_emit!(self, "\n");
+            try!(spaces(self.writer, *curr_indent));
+        }
         try_emit!(self, "<");
         try_emit!(self, name);
         try_emit!(self, ">");
@@ -299,10 +303,6 @@ impl<'a> ::Encoder for Encoder<'a> {
         try_emit!(self, "</");
         try_emit!(self, name);
         try_emit!(self, ">");
-        if let EncodingFormat::Pretty{ref curr_indent, ..} = self.format {
-            try_emit!(self, "\n");
-            try!(spaces(self.writer, *curr_indent));
-        }
         Ok(())
     }
 
@@ -354,7 +354,15 @@ impl<'a> ::Encoder for Encoder<'a> {
     {
         if self.is_emitting_map_key { return Err(EncoderError::BadHashmapKey); }
         if len > 0 {
+            if let EncodingFormat::Pretty{ref mut curr_indent, ref indent} = self.format {
+                *curr_indent += *indent;
+            }
             try!(f(self));
+            if let EncodingFormat::Pretty{ref mut curr_indent, ref indent} = self.format {
+                *curr_indent -= *indent;
+                try!(write!(self.writer, "\n"));
+                try!(spaces(self.writer, *curr_indent));
+            }
         }
         Ok(())
     }
@@ -866,19 +874,23 @@ mod tests {
             encode(&complex_obj).unwrap(),
             "<Complex>\
                 <b>\
-                    <Simple2><c>&uiaebla<>hello\x0c\r</c></Simple2>\
+                    <Simple2><c>&amp;uiaebla&lt;&gt;hello\x0c\r</c></Simple2>\
                     <Simple2><c></c></Simple2>\
-                </b>
+                </b>\
             </Complex>"
         );
 
         assert_eq!(
             encode_pretty(&complex_obj).unwrap(),
-            "<Complex>\
-                <b>\n  \
-                    <Simple2><c>&uiaebla<>hello\x0c\r</c></Simple2>\n  \
-                    <Simple2><c></c></Simple2>\n  \
-                </b>\n  \
+            "<Complex>\n  \
+                <b>\n    \
+                    <Simple2>\n      \
+                        <c>&amp;uiaebla&lt;&gt;hello\x0c\r</c>\n    \
+                    </Simple2>\n    \
+                    <Simple2>\n      \
+                        <c></c>\n    \
+                    </Simple2>\n  \
+                </b>\n\
             </Complex>"
         );
     }
