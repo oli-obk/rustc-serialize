@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
-use std::num::Int;
+use std::num::{Int, ParseIntError};
 use std::{fmt, error};
+use std::str::FromStr;
+use std::iter::Peekable;
 
 #[derive(Copy, Debug)]
 pub enum EncoderError {
@@ -470,7 +472,7 @@ pub fn decode<T>(rdr: &str) -> DecodeResult<T> where T: ::Decodable {
 }
 
 pub struct Decoder<I : Iterator<Item = char>> {
-    rdr: I,
+    rdr: Peekable<I>,
     is_reading_raw_field: bool,
 }
 
@@ -478,13 +480,20 @@ impl<I> Decoder<I> where I: Iterator<Item = char> {
 
     fn new(rdr: I) -> Decoder<I> {
         Decoder {
-            rdr: rdr,
+            rdr: rdr.peekable(),
             is_reading_raw_field: true,
         }
     }
 
     fn dump(self) -> ! {
         panic!("{}", self.rdr.collect::<String>());
+    }
+
+    fn read_tag(&mut self, name: &str) -> DecodeResult<String> {
+        try!(self.expect_open_tag(name));
+        let content = try!(self.read_until_exclusive('<'));
+        try!(self.expect_close_tag(name));
+        Ok(content)
     }
 
     fn expect_empty_tag(&mut self, name: &str) -> DecodeResult<()> {
@@ -535,8 +544,32 @@ impl<I> Decoder<I> where I: Iterator<Item = char> {
         Err(EOF)
     }
 
-    fn bump_until(&mut self, ch: char) -> DecodeResult<char> {
-        self.rdr.find(|&c| c == ch).ok_or(EOF)
+    fn read_until_exclusive(&mut self, ch: char) -> DecodeResult<String> {
+        let mut s = String::new();
+        while let Some(&c) = self.rdr.peek() {
+            if ch == c { return Ok(s); }
+            s.push(c);
+            if let None = self.rdr.next() {
+                break;
+            }
+        }
+        Err(EOF)
+    }
+
+    fn bump_until_inclusive(&mut self, ch: char) -> DecodeResult<()> {
+        match self.rdr.find(|&c| c == ch) {
+            Some(_) => Ok(()),
+            None => Err(EOF),
+        }
+    }
+    fn bump_until_exclusive(&mut self, ch: char) -> DecodeResult<()> {
+        while let Some(&c) = self.rdr.peek() {
+            if ch == c { return Ok(()); }
+            if let None = self.rdr.next() {
+                break;
+            }
+        }
+        Err(EOF)
     }
 
     fn bump(&mut self) -> DecodeResult<char> {
@@ -548,26 +581,50 @@ impl<I> Decoder<I> where I: Iterator<Item = char> {
 pub enum DecoderError {
     Expected(char, char),
     EOF,
+    ParseInt(ParseIntError),
 }
 use self::DecoderError::*;
 
+impl error::FromError<ParseIntError> for DecoderError {
+    fn from_error(err: ParseIntError) -> DecoderError {
+        DecoderError::ParseInt(err)
+    }
+}
+
 pub type DecodeResult<T> = Result<T, DecoderError>;
+
+macro_rules! read_primitive {
+    ($name:ident, $ty:ty) => {
+        fn $name(&mut self) -> DecodeResult<$ty> {
+            let content = if self.is_reading_raw_field {
+                self.read_tag("int")
+            } else {
+                self.read_until_exclusive('<')
+            };
+            let content = try!(content);
+            let content = content.as_slice();
+            Ok(try!(FromStr::from_str(content)))
+        }
+    }
+}
 
 impl<I> ::Decoder for Decoder<I> where I: Iterator<Item = char> {
     type Error = DecoderError;
 
     // Primitive types:
     fn read_nil(&mut self) -> DecodeResult<()> { unimplemented!() }
-    fn read_usize(&mut self) -> DecodeResult<usize> { unimplemented!() }
-    fn read_u64(&mut self) -> DecodeResult<u64> { unimplemented!() }
-    fn read_u32(&mut self) -> DecodeResult<u32> { unimplemented!() }
-    fn read_u16(&mut self) -> DecodeResult<u16> { unimplemented!() }
-    fn read_u8(&mut self) -> DecodeResult<u8> { unimplemented!() }
-    fn read_isize(&mut self) -> DecodeResult<isize> { unimplemented!() }
-    fn read_i64(&mut self) -> DecodeResult<i64> { unimplemented!() }
-    fn read_i32(&mut self) -> DecodeResult<i32> { unimplemented!() }
-    fn read_i16(&mut self) -> DecodeResult<i16> { unimplemented!() }
-    fn read_i8(&mut self) -> DecodeResult<i8> { unimplemented!() }
+
+    read_primitive! { read_usize, usize }
+    read_primitive! { read_u8, u8 }
+    read_primitive! { read_u16, u16 }
+    read_primitive! { read_u32, u32 }
+    read_primitive! { read_u64, u64 }
+    read_primitive! { read_isize, isize }
+    read_primitive! { read_i8, i8 }
+    read_primitive! { read_i16, i16 }
+    read_primitive! { read_i32, i32 }
+    read_primitive! { read_i64, i64 }
+
     fn read_bool(&mut self) -> DecodeResult<bool> { unimplemented!() }
     fn read_f64(&mut self) -> DecodeResult<f64> { unimplemented!() }
     fn read_f32(&mut self) -> DecodeResult<f32> { unimplemented!() }
