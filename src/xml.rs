@@ -1,6 +1,5 @@
 #![allow(dead_code)]
 
-use std::iter::IntoIterator;
 use std::num::Int;
 use std::{fmt, error};
 
@@ -441,17 +440,121 @@ impl<'a> ::Encoder for Encoder<'a> {
     }
 }
 
+macro_rules! read_lit {
+    ($enc:ident,$e:expr,$txt:expr) => {{
+        if $enc.is_reading_raw_field {
+            expect!($enc.read_open_tag(), format!("<{}>", $txt));
+            expect!($enc.read_close_tag(), format!("</{}>", $txt));
+        } else {
+            try!(write!($enc.writer, "{}", $e));
+        }
+        Ok(())
+    }}
+}
 
-/*
+macro_rules! expect {
+    ($e:expr, $f:expr) => {{
+        let e = try!($e);
+        if e != $f {
+            try!(Err(Expected(e, $f)));
+        }
+    }}
+}
 
-pub struct XmlDecoder {}
+pub fn decode<T>(rdr: &str) -> DecodeResult<T> where T: ::Decodable {
+    let mut decoder = Decoder::new(rdr.chars());
+    match ::Decodable::decode(&mut decoder) {
+        Ok(val) => Ok(val),
+        Err(_) => decoder.dump(),
+    }
+}
 
-pub enum XmlError {}
+pub struct Decoder<I : Iterator<Item = char>> {
+    rdr: I,
+    is_reading_raw_field: bool,
+}
 
-pub type DecodeResult<T> = Result<T, XmlError>
+impl<I> Decoder<I> where I: Iterator<Item = char> {
 
-impl Decoder for XmlDecoder {
-    type Error = XmlError;
+    fn new(rdr: I) -> Decoder<I> {
+        Decoder {
+            rdr: rdr,
+            is_reading_raw_field: true,
+        }
+    }
+
+    fn dump(self) -> ! {
+        panic!("{}", self.rdr.collect::<String>());
+    }
+
+    fn expect_empty_tag(&mut self, name: &str) -> DecodeResult<()> {
+        expect!(self.bump_skip_ws(), '<');
+
+        for ch in name.chars() {
+            expect!(self.bump(), ch);
+        }
+
+        if try!(self.bump()) == '/' {
+            expect!(self.bump(), '>');
+            return Ok(());
+        }
+        expect!(self.bump(), '>');
+        self.expect_close_tag(name)
+    }
+
+    fn expect_open_tag(&mut self, name: &str) -> DecodeResult<()> {
+        expect!(self.bump_skip_ws(), '<');
+
+        for ch in name.chars() {
+            expect!(self.bump(), ch);
+        }
+
+        expect!(self.bump(), '>');
+        Ok(())
+    }
+
+    fn expect_close_tag(&mut self, name: &str) -> DecodeResult<()> {
+        expect!(self.bump_skip_ws(), '<');
+
+        expect!(self.bump(), '/');
+
+        for ch in name.chars() {
+            expect!(self.bump(), ch);
+        }
+
+        expect!(self.bump(), '>');
+        Ok(())
+    }
+
+    fn bump_skip_ws(&mut self) -> DecodeResult<char> {
+        for c in &mut self.rdr {
+            if !c.is_whitespace() {
+                return Ok(c);
+            }
+        }
+        Err(EOF)
+    }
+
+    fn bump_until(&mut self, ch: char) -> DecodeResult<char> {
+        self.rdr.find(|&c| c == ch).ok_or(EOF)
+    }
+
+    fn bump(&mut self) -> DecodeResult<char> {
+        self.rdr.next().ok_or(EOF)
+    }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum DecoderError {
+    Expected(char, char),
+    EOF,
+}
+use self::DecoderError::*;
+
+pub type DecodeResult<T> = Result<T, DecoderError>;
+
+impl<I> ::Decoder for Decoder<I> where I: Iterator<Item = char> {
+    type Error = DecoderError;
 
     // Primitive types:
     fn read_nil(&mut self) -> DecodeResult<()> { unimplemented!() }
@@ -486,7 +589,7 @@ impl Decoder for XmlDecoder {
                                       -> DecodeResult<T>
         where F: FnMut(&mut Self, usize) -> DecodeResult<T> { unimplemented!() }
     fn read_enum_struct_variant_field<T, F>(&mut self,
-                                            &f_name: &str,
+                                            f_name: &str,
                                             f_idx: usize,
                                             f: F)
                                             -> DecodeResult<T>
@@ -534,331 +637,27 @@ impl Decoder for XmlDecoder {
         where F: FnOnce(&mut Self) -> DecodeResult<T> { unimplemented!() }
 
     // Failure
-    fn error(&mut self, err: &str) -> Self::Error { unimplemented!() }
-}
-*/
-
-#[derive(Debug, PartialEq, Eq)]
-enum Content {
-    Text(String),
-    Elements(Vec<Element>),
-    Nothing,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct Attribute {
-    name: String,
-    value: String,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct Element {
-    attributes: Vec<Attribute>,
-    content: Content,
-    name : String,
-}
-
-#[derive(Debug)]
-struct Parser<T> {
-    rdr: T,
-    line: usize,
-    col: usize,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-struct ParserError {
-    line: usize,
-    col: usize,
-    kind: ParserErrorKind,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum ParserErrorKind {
-    MultipleRoots,
-    BogusGt, // >
-    BogusLt, // <
-    EOF,
-    Unexpected(char),
-    BadNameChar,
-    EmptyAttributeName,
-    EmptyElementName,
-    MixedTextAndElements,
-}
-
-type ParserResult<T> = Result<T, ParserError>;
-type ParserKindResult<T> = Result<T, ParserErrorKind>;
-
-use self::ParserErrorKind::*;
-
-macro_rules! expect {
-    ($a:expr, $b:expr) => {{
-        let ch = try!($a);
-        if ch != $b {
-            return Err(Unexpected(ch));
-        }
-    }}
+    fn error(&mut self, err: &str) -> DecoderError { unimplemented!() }
 }
 
 fn is_bad_name_char(c : char) -> bool {
     r###"!"#$%&'()*+,/;<=>?@[\]^`{|}~"###.contains_char(c)
 }
 
-impl<T> Parser<T> where T: Iterator<Item = char> {
-    /// Creates the Xml parser.
-    pub fn new<U>(rdr: U) -> Parser<T> where U: IntoIterator<Item = char, IntoIter = T> {
-        Parser {
-            rdr: rdr.into_iter(),
-            line: 1,
-            col: 0,
-        }
-    }
-
-    fn parse(&mut self) -> ParserResult<Element> {
-        match self.parse_element() {
-            Ok(el) => {
-                if self.parse_char_skip_ws() == Err(EOF) {
-                    Ok(el)
-                } else {
-                    Err(ParserError {
-                        kind: MultipleRoots,
-                        line: self.line,
-                        col: self.col,
-                    })
-                }
-            },
-            Err(err) => Err(ParserError {
-                kind: err,
-                line: self.line,
-                col: self.col,
-            }),
-        }
-    }
-
-    fn parse_element_name(&mut self, first_char: char) -> ParserKindResult<Element> {
-        if is_bad_name_char(first_char) { return Err(BadNameChar); }
-        if first_char.is_whitespace() { return Err(EmptyElementName); }
-
-        let mut name = format!("{}", first_char);
-        loop {
-            match try!(self.parse_char()) {
-                '>' => return self.parse_element_body(name, vec![]),
-                c if is_bad_name_char(c) => return Err(BadNameChar),
-                c if c.is_whitespace() => break,
-                c => name.push(c),
-            }
-        }
-        self.parse_element_attributes(name)
-    }
-
-    fn parse_element(&mut self) -> ParserKindResult<Element> {
-        expect!(self.parse_char(), '<');
-        let ch = try!(self.parse_char());
-        self.parse_element_name(ch)
-    }
-
-    fn parse_element_body(&mut self,
-                          name: String,
-                          attributes: Vec<Attribute>)
-                          -> ParserKindResult<Element> {
-        let mut text = String::new();
-        loop {
-            match try!(self.parse_char()) {
-                '<' => match try!(self.parse_char()) {
-                    '/' => return self.parse_element_close(name, attributes, Content::Nothing),
-                    c => {
-                        let inner = try!(self.parse_element_name(c));
-                        return self.parse_element_content_elements(name, attributes, inner);
-                    }
-                },
-                c => {
-                    text.push(c);
-                    if c.is_whitespace() { continue; }
-                    return self.parse_element_content_text(name, attributes, text);
-                }
-            }
-        }
-    }
-
-    fn parse_element_close(&mut self,
-                           name: String,
-                           attributes: Vec<Attribute>,
-                           content: Content)
-                           -> ParserKindResult<Element> {
-        for c in name.chars() {
-            expect!(self.parse_char(), c);
-        }
-        expect!(self.parse_char(), '>');
-        Ok(Element {
-            name: name,
-            attributes: attributes,
-            content: content,
-        })
-    }
-
-    fn parse_element_content_elements(&mut self,
-                                      name: String,
-                                      attributes: Vec<Attribute>,
-                                      first_element: Element)
-                                      -> ParserKindResult<Element> {
-        let mut v = vec![first_element];
-        loop {
-            match try!(self.parse_char_skip_ws()) {
-                '<' => match try!(self.parse_char()) {
-                    '/' => return self.parse_element_close(name, attributes, Content::Elements(v)),
-                    c => v.push(try!(self.parse_element_name(c))),
-                },
-                _ => return Err(MixedTextAndElements),
-            }
-        }
-    }
-
-    fn parse_element_content_text(&mut self,
-                                  name: String,
-                                  attributes: Vec<Attribute>,
-                                  mut text: String)
-                                  -> ParserKindResult<Element> {
-        loop {
-            match try!(self.parse_char()) {
-                '<' => match try!(self.parse_char()) {
-                    '/' => return self.parse_element_close(name, attributes, Content::Text(text)),
-                    _ => return Err(MixedTextAndElements),
-                },
-                c => text.push(c),
-            }
-        }
-    }
-
-    fn parse_element_attributes(&mut self, name: String) -> ParserKindResult<Element> {
-        let mut v = vec![];
-        loop {
-            let mut attr_name = String::new();
-            match try!(self.parse_char_skip_ws()) {
-                '>' => return self.parse_element_body(name, v),
-                '=' => return Err(EmptyAttributeName),
-                c => attr_name.push(c),
-            }
-            loop {
-                match try!(self.parse_char()) {
-                    c if c.is_whitespace() => {
-                        expect!(self.parse_char_skip_ws(), '=');
-                        break;
-                    },
-                    '=' => break,
-                    c => attr_name.push(c),
-                }
-            }
-            expect!(self.parse_char_skip_ws(), '"');
-            let mut attr_value = String::new();
-            loop {
-                match try!(self.parse_char()) {
-                    '"' => break,
-                    c => attr_value.push(c),
-                }
-            }
-            v.push(Attribute {
-                name: attr_name,
-                value: attr_value,
-            });
-        }
-    }
-    fn parse_char_skip_ws(&mut self) -> ParserKindResult<char> {
-        loop {
-            match try!(self.parse_char()) {
-                c if c.is_whitespace() => continue,
-                c => return Ok(c),
-            }
-        }
-    }
-
-    fn parse_char(&mut self) -> ParserKindResult<char> {
-        let ch = try!(self.rdr.next().ok_or(EOF));
-        match ch {
-            '\n' => {
-                self.line += 1;
-                self.col = 1;
-            },
-            _ => self.col += 1,
-        }
-        Ok(ch)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     extern crate test;
-    use super::{Parser, Element, Content, ParserError, Attribute, encode, encode_pretty};
-    use super::ParserErrorKind::*;
+    use super::{encode, encode_pretty, decode};
+    use super::DecoderError::*;
 
     #[test]
-    fn test_parse_root_elem() {
-        let txt = "<root><elem></elem></root>";
-        let mut p = Parser::new(txt.chars());
-        let structure = Element {
-            name: "root".to_string(),
-            attributes: vec![],
-            content: Content::Elements(vec![Element{
-                name: "elem".to_string(),
-                attributes: vec![],
-                content: Content::Nothing,
-            }])
-        };
-        assert_eq!(p.parse(), Ok(structure));
-    }
-
-    #[test]
-    fn test_parse_attributes() {
-        let txt = r#"<root><elem bla="blub hi cake><></baa>"></elem></root>"#;
-        let mut p = Parser::new(txt.chars());
-        let structure = Element {
-            name: "root".to_string(),
-            attributes: vec![],
-            content: Content::Elements(vec![Element{
-                name: "elem".to_string(),
-                attributes: vec![
-                    Attribute {
-                        name: "bla".to_string(),
-                        value: "blub hi cake><></baa>".to_string(),
-                    }
-                ],
-                content: Content::Nothing,
-            }])
-        };
-        assert_eq!(p.parse(), Ok(structure));
-    }
-
-    #[test]
-    fn test_parse_text() {
-        let txt = r#"<root>   i am groot!  </root>"#;
-        let mut p = Parser::new(txt.chars());
-        let structure = Element {
-            name: "root".to_string(),
-            attributes: vec![],
-            content: Content::Text("   i am groot!  ".to_string()),
-        };
-        assert_eq!(p.parse(), Ok(structure));
-    }
-
-    #[test]
-    fn test_parse_nothing() {
-        let txt = r#"<root>     </root>"#;
-        let mut p = Parser::new(txt.chars());
-        let structure = Element {
-            name: "root".to_string(),
-            attributes: vec![],
-            content: Content::Nothing,
-        };
-        assert_eq!(p.parse(), Ok(structure));
-    }
-
-    #[test]
-    fn test_parse_two_roots() {
-        let txt = "<root></root><root></root>";
-        let mut p = Parser::new(txt.chars());
-        assert_eq!(p.parse(), Err(ParserError {
-            kind: MultipleRoots,
-            col: 14,
-            line: 1,
-        }));
+    fn test_read_object() {
+        #[derive(RustcDecodable, Debug, PartialEq)]
+        struct Dummy;
+        let dec = decode("<Dummy/>");
+        assert_eq!(dec, Ok(Dummy));
+        let dec = decode("<Dummy></Dummy>");
+        assert_eq!(dec, Ok(Dummy));
     }
 
     #[test]
