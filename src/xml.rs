@@ -32,6 +32,18 @@ pub struct Encoder<'a> {
     writer: &'a mut (fmt::Write+'a),
     format : EncodingFormat,
     is_emitting_map_key: bool,
+    is_emitting_raw_field: bool,
+}
+
+macro_rules! emit_lit {
+    ($enc:ident,$e:expr,$txt:expr) => {{
+        if $enc.is_emitting_raw_field {
+            try!(write!($enc.writer, "<{1}>{0}</{1}>", $e, $txt));
+        } else {
+            try!(write!($enc.writer, "{}", $e));
+        }
+        Ok(())
+    }}
 }
 
 macro_rules! emit {
@@ -58,6 +70,7 @@ impl<'a> Encoder<'a> {
                 indent: 2,
             },
             is_emitting_map_key: false,
+            is_emitting_raw_field: true,
         }
     }
 
@@ -68,6 +81,7 @@ impl<'a> Encoder<'a> {
             writer: writer,
             format: EncodingFormat::Compact,
             is_emitting_map_key: false,
+            is_emitting_raw_field: true,
         }
     }
 
@@ -146,43 +160,49 @@ impl<'a> ::Encoder for Encoder<'a> {
 
     fn emit_nil(&mut self) -> EncodeResult<()> {
         if self.is_emitting_map_key { return Err(EncoderError::BadHashmapKey); }
-        try!(write!(self.writer, "null"));
+        try!(write!(self.writer, "<null/>"));
         Ok(())
     }
 
-    fn emit_usize(&mut self, v: usize) -> EncodeResult<()> { emit!(self, v) }
-    fn emit_u64(&mut self, v: u64) -> EncodeResult<()> { emit!(self, v) }
-    fn emit_u32(&mut self, v: u32) -> EncodeResult<()> { emit!(self, v) }
-    fn emit_u16(&mut self, v: u16) -> EncodeResult<()> { emit!(self, v) }
-    fn emit_u8(&mut self, v: u8) -> EncodeResult<()> { emit!(self, v) }
+    fn emit_usize(&mut self, v: usize) -> EncodeResult<()> { emit_lit!(self, v, "int") }
+    fn emit_u64(&mut self, v: u64) -> EncodeResult<()> { emit_lit!(self, v, "int") }
+    fn emit_u32(&mut self, v: u32) -> EncodeResult<()> { emit_lit!(self, v, "int") }
+    fn emit_u16(&mut self, v: u16) -> EncodeResult<()> { emit_lit!(self, v, "int") }
+    fn emit_u8(&mut self, v: u8) -> EncodeResult<()> { emit_lit!(self, v, "int") }
 
-    fn emit_isize(&mut self, v: isize) -> EncodeResult<()> { emit!(self, v) }
-    fn emit_i64(&mut self, v: i64) -> EncodeResult<()> { emit!(self, v) }
-    fn emit_i32(&mut self, v: i32) -> EncodeResult<()> { emit!(self, v) }
-    fn emit_i16(&mut self, v: i16) -> EncodeResult<()> { emit!(self, v) }
-    fn emit_i8(&mut self, v: i8) -> EncodeResult<()> { emit!(self, v) }
+    fn emit_isize(&mut self, v: isize) -> EncodeResult<()> { emit_lit!(self, v, "int") }
+    fn emit_i64(&mut self, v: i64) -> EncodeResult<()> { emit_lit!(self, v, "int") }
+    fn emit_i32(&mut self, v: i32) -> EncodeResult<()> { emit_lit!(self, v, "int") }
+    fn emit_i16(&mut self, v: i16) -> EncodeResult<()> { emit_lit!(self, v, "int") }
+    fn emit_i8(&mut self, v: i8) -> EncodeResult<()> { emit_lit!(self, v, "int") }
 
     fn emit_bool(&mut self, v: bool) -> EncodeResult<()> {
         if self.is_emitting_map_key { return Err(EncoderError::BadHashmapKey); }
         if v {
-            emit!(self, "true")
+            emit!(self, "<true/>")
         } else {
-            emit!(self, "false")
+            emit!(self, "<false/>")
         }
     }
 
     fn emit_f64(&mut self, v: f64) -> EncodeResult<()> {
-        emit!(self, v)
+        emit_lit!(self, v, "float")
     }
     fn emit_f32(&mut self, v: f32) -> EncodeResult<()> {
         self.emit_f64(v as f64)
     }
 
     fn emit_char(&mut self, v: char) -> EncodeResult<()> {
-        escape_char(self.writer, v)
+        if self.is_emitting_raw_field { try_emit!(self, "<char>"); }
+        try!(escape_char(self.writer, v));
+        if self.is_emitting_raw_field { try_emit!(self, "</char>"); }
+        Ok(())
     }
     fn emit_str(&mut self, v: &str) -> EncodeResult<()> {
-        escape_str(self.writer, v)
+        if self.is_emitting_raw_field { try_emit!(self, "<string>"); }
+        try!(escape_str(self.writer, v));
+        if self.is_emitting_raw_field { try_emit!(self, "</string>"); }
+        Ok(())
     }
 
     fn emit_enum<F>(&mut self, _name: &str, f: F) -> EncodeResult<()> where
@@ -210,12 +230,9 @@ impl<'a> ::Encoder for Encoder<'a> {
             emit!(self, "/>")
         } else {
             if self.is_emitting_map_key { return Err(EncoderError::BadHashmapKey); }
+            try_emit!(self, ">");
             if let EncodingFormat::Pretty{ref mut curr_indent, indent} = self.format {
-                try_emit!(self, ">\n");
                 *curr_indent += indent;
-                try!(spaces(self.writer, *curr_indent));
-            } else {
-                try_emit!(self, ">");
             }
             try!(f(self));
             if let EncodingFormat::Pretty{ref mut curr_indent, indent} = self.format {
@@ -229,10 +246,17 @@ impl<'a> ::Encoder for Encoder<'a> {
         }
     }
 
-    fn emit_enum_variant_arg<F>(&mut self, idx: usize, f: F) -> EncodeResult<()> where
+    fn emit_enum_variant_arg<F>(&mut self, _: usize, f: F) -> EncodeResult<()> where
         F: FnOnce(&mut Encoder<'a>) -> EncodeResult<()>,
     {
-        self.emit_struct_field("field", idx, f)
+        if let EncodingFormat::Pretty{ref curr_indent, ..} = self.format {
+            try!(write!(self.writer, "\n"));
+            try!(spaces(self.writer, *curr_indent));
+        }
+        self.is_emitting_raw_field = true;
+        try!(f(self));
+        self.is_emitting_raw_field = false;
+        Ok(())
     }
 
     fn emit_enum_struct_variant<F>(&mut self,
@@ -247,13 +271,13 @@ impl<'a> ::Encoder for Encoder<'a> {
     }
 
     fn emit_enum_struct_variant_field<F>(&mut self,
-                                         _: &str,
+                                         name: &str,
                                          idx: usize,
                                          f: F) -> EncodeResult<()> where
         F: FnOnce(&mut Encoder<'a>) -> EncodeResult<()>,
     {
         if self.is_emitting_map_key { return Err(EncoderError::BadHashmapKey); }
-        self.emit_enum_variant_arg(idx, f)
+        self.emit_struct_field(name, idx, f)
     }
 
 
@@ -261,6 +285,7 @@ impl<'a> ::Encoder for Encoder<'a> {
         F: FnOnce(&mut Encoder<'a>) -> EncodeResult<()>,
     {
         if self.is_emitting_map_key { return Err(EncoderError::BadHashmapKey); }
+        self.is_emitting_raw_field = false;
         try_emit!(self, "<");
         if name.chars().any(|ch| is_bad_name_char(ch)) {
             return Err(EncoderError::BadStructName);
@@ -375,7 +400,10 @@ impl<'a> ::Encoder for Encoder<'a> {
             try!(write!(self.writer, "\n"));
             try!(spaces(self.writer, *curr_indent));
         }
-        f(self)
+        self.is_emitting_raw_field = true;
+        try!(f(self));
+        self.is_emitting_raw_field = false;
+        Ok(())
     }
 
     fn emit_map<F>(&mut self, len: usize, f: F) -> EncodeResult<()> where
@@ -406,7 +434,10 @@ impl<'a> ::Encoder for Encoder<'a> {
         F: FnOnce(&mut Encoder<'a>) -> EncodeResult<()>,
     {
         if self.is_emitting_map_key { return Err(EncoderError::BadHashmapKey); }
-        f(self)
+        self.is_emitting_raw_field = true;
+        try!(f(self));
+        self.is_emitting_raw_field = false;
+        Ok(())
     }
 }
 
@@ -844,12 +875,12 @@ mod tests {
 
         assert_eq!(
             encode(&Simple{a: true}).unwrap(),
-            "<Simple><a>true</a></Simple>"
+            "<Simple><a><true/></a></Simple>"
         );
         assert_eq!(
             encode_pretty(&Simple{a: true}).unwrap(),
             "<Simple>\n  \
-                <a>true</a>\n\
+                <a><true/></a>\n\
             </Simple>"
         );
 
@@ -894,34 +925,24 @@ mod tests {
             </Complex>"
         );
     }
-/*
+
     #[test]
     fn test_write_enum() {
-        let animal = Dog;
-        assert_eq!(
-            format!("{}", super::as_json(&animal)),
-            "\"Dog\""
-        );
-        assert_eq!(
-            format!("{}", super::as_pretty_json(&animal)),
-            "\"Dog\""
-        );
+        #[derive(RustcEncodable)]
+        enum Animal {
+            Dog,
+            Frog(String, i32),
+        }
 
-        let animal = Frog("Henry".to_string(), 349);
-        assert_eq!(
-            format!("{}", super::as_json(&animal)),
-            "{\"variant\":\"Frog\",\"fields\":[\"Henry\",349]}"
-        );
-        assert_eq!(
-            format!("{}", super::as_pretty_json(&animal)),
-            "{\n  \
-               \"variant\": \"Frog\",\n  \
-               \"fields\": [\n    \
-                 \"Henry\",\n    \
-                 349\n  \
-               ]\n\
-             }"
-        );
+        assert_eq!(encode(&Animal::Dog).unwrap(), "<Dog/>");
+        assert_eq!(encode_pretty(&Animal::Dog).unwrap(), "<Dog/>");
+
+        let animal = Animal::Frog("Henry".to_string(), 349);
+        assert_eq!(encode(&animal).unwrap(), "<Frog><string>Henry</string><int>349</int></Frog>");
+        assert_eq!(encode_pretty(&animal).unwrap(), "\
+        <Frog>\n  \
+            <string>Henry</string>\n  \
+            <int>349</int>\n\
+        </Frog>");
     }
-    */
 }
