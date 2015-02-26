@@ -1,6 +1,6 @@
-#![allow(dead_code)]
+#![allow(dead_code, unused_variables)]
 
-use std::num::{Int, ParseIntError};
+use std::num::{Int, ParseIntError, ParseFloatError};
 use std::{fmt, error};
 use std::str::FromStr;
 use std::iter::Peekable;
@@ -442,23 +442,19 @@ impl<'a> ::Encoder for Encoder<'a> {
     }
 }
 
-macro_rules! read_lit {
-    ($enc:ident,$e:expr,$txt:expr) => {{
-        if $enc.is_reading_raw_field {
-            expect!($enc.read_open_tag(), format!("<{}>", $txt));
-            expect!($enc.read_close_tag(), format!("</{}>", $txt));
-        } else {
-            try!(write!($enc.writer, "{}", $e));
-        }
-        Ok(())
-    }}
-}
-
 macro_rules! expect {
     ($e:expr, $f:expr) => {{
         let e = try!($e);
         if e != $f {
-            try!(Err(Expected(e, $f)));
+            try!(Err(ExpectedChar(e, $f)));
+        }
+    }}
+}
+
+macro_rules! expect_str {
+    ($sel:ident, $f:expr) => {{
+        for c in $f.chars() {
+            expect!($sel.bump(), c);
         }
     }}
 }
@@ -467,7 +463,7 @@ pub fn decode<T>(rdr: &str) -> DecodeResult<T> where T: ::Decodable {
     let mut decoder = Decoder::new(rdr.chars());
     match ::Decodable::decode(&mut decoder) {
         Ok(val) => Ok(val),
-        Err(_) => decoder.dump(),
+        Err(err) => panic!("{:?}: {}", err, decoder.dump()),
     }
 }
 
@@ -485,8 +481,8 @@ impl<I> Decoder<I> where I: Iterator<Item = char> {
         }
     }
 
-    fn dump(self) -> ! {
-        panic!("{}", self.rdr.collect::<String>());
+    fn dump(self) -> String {
+        self.rdr.collect::<String>()
     }
 
     fn read_tag(&mut self, name: &str) -> DecodeResult<String> {
@@ -503,12 +499,14 @@ impl<I> Decoder<I> where I: Iterator<Item = char> {
             expect!(self.bump(), ch);
         }
 
-        if try!(self.bump()) == '/' {
-            expect!(self.bump(), '>');
-            return Ok(());
+        match try!(self.bump()) {
+            '/' => {
+	            expect!(self.bump(), '>');
+	            Ok(())
+            },
+            '>' => self.expect_close_tag(name),
+            c => Err(ExpectedChars(c, "/>"))
         }
-        expect!(self.bump(), '>');
-        self.expect_close_tag(name)
     }
 
     fn expect_open_tag(&mut self, name: &str) -> DecodeResult<()> {
@@ -579,9 +577,16 @@ impl<I> Decoder<I> where I: Iterator<Item = char> {
 
 #[derive(Debug, PartialEq)]
 pub enum DecoderError {
-    Expected(char, char),
+    ExpectedChar(char, char),
+    ExpectedChars(char, &'static str),
     EOF,
     ParseInt(ParseIntError),
+    ParseFloat(ParseFloatError),
+    ExpectedBool,
+    UnmatchedAmpersand,
+    StringInsteadChar,
+    NoChar,
+    BadEncodedChar,
 }
 use self::DecoderError::*;
 
@@ -590,46 +595,136 @@ impl error::FromError<ParseIntError> for DecoderError {
         DecoderError::ParseInt(err)
     }
 }
+impl error::FromError<ParseFloatError> for DecoderError {
+    fn from_error(err: ParseFloatError) -> DecoderError {
+        DecoderError::ParseFloat(err)
+    }
+}
 
 pub type DecodeResult<T> = Result<T, DecoderError>;
 
+macro_rules! read_str {
+    ($sel: ident, $name: expr) => {{
+        let content = if $sel.is_reading_raw_field {
+            $sel.read_tag($name)
+        } else {
+            $sel.read_until_exclusive('<')
+        };
+        try!(content)
+    }}
+}
+
 macro_rules! read_primitive {
-    ($name:ident, $ty:ty) => {
-        fn $name(&mut self) -> DecodeResult<$ty> {
-            let content = if self.is_reading_raw_field {
-                self.read_tag("int")
-            } else {
-                self.read_until_exclusive('<')
-            };
-            let content = try!(content);
+    ($ident:ident, $ty:ty, $name:expr) => {
+        fn $ident(&mut self) -> DecodeResult<$ty> {
+            let content = read_str!(self, $name);
             let content = content.as_slice();
             Ok(try!(FromStr::from_str(content)))
         }
     }
 }
 
+fn hex2int(s: &str) -> DecodeResult<u32> {
+    if s.len() > 8 || s.len() == 0 {
+        return Err(BadEncodedChar);
+    }
+    let mut res = 0;
+    for c in s.chars() {
+        res *= 16;
+        let c = c.to_digit(16);
+        let c = try!(c.ok_or(BadEncodedChar));
+        res += c;
+    }
+    Ok(res)
+}
+
+fn decode_xml_char(s: &str) -> DecodeResult<char> {
+    use std::char::from_u32;
+    Ok(match s {
+        "amp" => '&',
+        "quot" => '"',
+        "apos" => '\'',
+        "lt" => '<',
+        "gt" => '>',
+        "" => return Err(NoChar),
+        s if s.len() < 2 => return Err(BadEncodedChar),
+        s if s.char_at(0) == '#' => {
+            let s = &s[1..];
+            let num = if s.char_at(0) == 'x' {
+                try!(hex2int(&s[1..]))
+            } else {
+                try!(FromStr::from_str(s))
+            };
+            try!(from_u32(num).ok_or(BadEncodedChar))
+        }
+        _ => return Err(BadEncodedChar),
+    })
+}
+
 impl<I> ::Decoder for Decoder<I> where I: Iterator<Item = char> {
     type Error = DecoderError;
 
     // Primitive types:
-    fn read_nil(&mut self) -> DecodeResult<()> { unimplemented!() }
+    fn read_nil(&mut self) -> DecodeResult<()> {
+        self.expect_empty_tag("null")
+    }
 
-    read_primitive! { read_usize, usize }
-    read_primitive! { read_u8, u8 }
-    read_primitive! { read_u16, u16 }
-    read_primitive! { read_u32, u32 }
-    read_primitive! { read_u64, u64 }
-    read_primitive! { read_isize, isize }
-    read_primitive! { read_i8, i8 }
-    read_primitive! { read_i16, i16 }
-    read_primitive! { read_i32, i32 }
-    read_primitive! { read_i64, i64 }
+    read_primitive! { read_usize, usize, "int" }
+    read_primitive! { read_u8, u8, "int" }
+    read_primitive! { read_u16, u16, "int" }
+    read_primitive! { read_u32, u32, "int" }
+    read_primitive! { read_u64, u64, "int" }
+    read_primitive! { read_isize, isize, "int" }
+    read_primitive! { read_i8, i8, "int" }
+    read_primitive! { read_i16, i16, "int" }
+    read_primitive! { read_i32, i32, "int" }
+    read_primitive! { read_i64, i64, "int" }
+    read_primitive! { read_f64, f64, "float" }
+    read_primitive! { read_f32, f32, "float" }
 
-    fn read_bool(&mut self) -> DecodeResult<bool> { unimplemented!() }
-    fn read_f64(&mut self) -> DecodeResult<f64> { unimplemented!() }
-    fn read_f32(&mut self) -> DecodeResult<f32> { unimplemented!() }
-    fn read_char(&mut self) -> DecodeResult<char> { unimplemented!() }
-    fn read_str(&mut self) -> DecodeResult<String> { unimplemented!() }
+    fn read_bool(&mut self) -> DecodeResult<bool> {
+        expect!(self.bump_skip_ws(), '<');
+        match try!(self.bump()) {
+            't' => { expect_str!(self, "rue/>"); Ok(true) },
+            'f' => { expect_str!(self, "alse/>"); Ok(false) },
+            _ => Err(ExpectedBool),
+        }
+    }
+    fn read_char(&mut self) -> DecodeResult<char> {
+        match try!(self.read_str()).as_slice() {
+            "" => Err(NoChar),
+            c if c.len() == 1 => Ok(c.char_at(0)),
+            _ => Err(StringInsteadChar),
+        }
+    }
+    fn read_str(&mut self) -> DecodeResult<String> {
+        let content = read_str!(self, "string");
+        let mut res = String::new();
+        let mut it = content.chars();
+        loop {
+            let c = match it.next() {
+                Some(c) => c,
+                None => return Ok(res),
+            };
+            if c != '&' {
+                res.push(c);
+                continue;
+            }
+            let mut encoded = String::new();
+            loop {
+                let c = match it.next() {
+                    Some(c) => c,
+                    None => return Err(UnmatchedAmpersand),
+                };
+                if c != ';' {
+                    encoded.push(c);
+                    continue;
+                }
+                break;
+            }
+            res.push(try!(decode_xml_char(encoded.as_slice())));
+        }
+    }
 
     // Compound types:
     fn read_enum<T, F>(&mut self, name: &str, f: F) -> DecodeResult<T>
@@ -654,13 +749,30 @@ impl<I> ::Decoder for Decoder<I> where I: Iterator<Item = char> {
 
     fn read_struct<T, F>(&mut self, s_name: &str, len: usize, f: F)
                          -> DecodeResult<T>
-        where F: FnOnce(&mut Self) -> DecodeResult<T> { unimplemented!() }
+        where F: FnOnce(&mut Self) -> DecodeResult<T> {
+        if len == 0 {
+            try!(self.expect_empty_tag(s_name));
+            f(self)
+        } else {
+	        try!(self.expect_open_tag(s_name));
+	        let res = try!(f(self));
+	        try!(self.expect_close_tag(s_name));
+	        Ok(res)
+        }
+    }
+
     fn read_struct_field<T, F>(&mut self,
                                f_name: &str,
-                               f_idx: usize,
+                               _: usize,
                                f: F)
                                -> DecodeResult<T>
-        where F: FnOnce(&mut Self) -> DecodeResult<T> { unimplemented!() }
+        where F: FnOnce(&mut Self) -> DecodeResult<T> {
+        try!(self.expect_open_tag(f_name));
+        self.is_reading_raw_field = false;
+        let res = try!(f(self));
+        try!(self.expect_close_tag(f_name));
+        Ok(res)
+    }
 
     fn read_tuple<T, F>(&mut self, len: usize, f: F) -> DecodeResult<T>
         where F: FnOnce(&mut Self) -> DecodeResult<T> { unimplemented!() }
@@ -705,7 +817,6 @@ fn is_bad_name_char(c : char) -> bool {
 mod tests {
     extern crate test;
     use super::{encode, encode_pretty, decode};
-    use super::DecoderError::*;
 
     #[test]
     fn test_read_object() {
@@ -715,6 +826,26 @@ mod tests {
         assert_eq!(dec, Ok(Dummy));
         let dec = decode("<Dummy></Dummy>");
         assert_eq!(dec, Ok(Dummy));
+    }
+
+    #[test]
+    fn test_read_string() {
+        #[derive(RustcDecodable, Debug, PartialEq)]
+        struct Dummy {
+            a: String,
+        };
+        let dec = decode("<Dummy><a>bla</a></Dummy>");
+        assert_eq!(dec, Ok(Dummy{a: "bla".to_string()}));
+    }
+
+    #[test]
+    fn test_read_encoded_string() {
+        #[derive(RustcDecodable, Debug, PartialEq)]
+        struct Dummy {
+            a: String,
+        };
+        let dec = decode("<Dummy><a>bla&amp;blub</a></Dummy>");
+        assert_eq!(dec, Ok(Dummy{a: "bla&blub".to_string()}));
     }
 
     #[test]
